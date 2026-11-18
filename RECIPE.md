@@ -124,8 +124,13 @@ it must not dock itself), and this repo's `keys.json`
   takes the press as a drag handle) plus `on_mouse_up` for the click itself.
 - `hc send` is the only program run: `hc(["send", "--force", <address>, <text>])`.
 - No images, no SVGs, no `exec`, no file reads. Glyphs are text (`⇄`, `›`, `×`).
-- `preview.png` was taken from the app with `herdr-app shot` on a 4090 + a 2084 column,
-  then cropped to the window's 1 px border.
+- `preview.png` is a **mock**, not a screenshot: an HTML page that copies the window's
+  chrome and type (same colours, 15 px Cascadia Mono/Consolas, the 32 px bar, the 18 px
+  `fill` strip), rendered at 2× with headless Edge and `Page.captureScreenshot`, then
+  downscaled to 1194×712. A real `herdr-app shot` shows whatever the terminals happen to
+  be printing — shell prompts with a user name and paths to real projects — which does not
+  belong in a public repo. The mock names the machines `alpha` / `beta` and prints
+  commands whose output has no paths in it (`uname -sr`, `nproc`, `make`, `ctest`).
 
 ## Watch out
 
