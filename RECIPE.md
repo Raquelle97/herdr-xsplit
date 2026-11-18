@@ -105,6 +105,9 @@ and truncating, `›` in `dim` at the right edge.
   `herdr-app do tab.new --mod xsplit` does.
 - **`props.open`** — a list of addresses — opens a window on the picker's first render
   and is then consumed, which is how a fixed set is launched from a shell.
+  `props.full` opens it filled. `props.toggle` runs the size button's action once on a
+  300 ms timer, which is how the fill/restore round trip is checked without a mouse —
+  a real click can't be scripted, and both states were verified that way.
 - **Modes are chosen in `init`**: `props.launcher` → the strip; `props.xsplitBar` → the
   bar; neither → the picker. `render` dispatches on that.
 
