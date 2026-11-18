@@ -94,6 +94,14 @@ tall, one column per picked terminal.
 
 - It is a window, not a tab. No divider drag, no `pane.split`/`pane.close`/`pane.zoom`,
   and it is not saved with the tab.
+- It is not an OS window either: Herdr has one window and this floats inside it. It
+  keeps where you dropped it (`key`), it stays above the panes, and a click beside it
+  doesn't close it — but it can't be moved to another monitor like a real window.
+- Columns are equal. The line between them is drawn, but dragging it does nothing: a
+  terminal block takes the press before the layout's resize boundary sees it.
+- Resize from the edges: the 14 px band along the bottom drags the width, the one along
+  the right edge the height. The size is applied on release, and the window reopens at
+  the new size in the same place.
 - With a terminal inside the window focused, those pane commands fail by design: the
   composition belongs to the mod, so change the layout in `main.js` instead.
 - Only terminals attached to a pane can be shown. A bare `hc run --bg` terminal has no

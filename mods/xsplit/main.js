@@ -18,6 +18,11 @@ import { terminals, panes, theme, openOverlay, closeOverlay, props, shared, setS
 
 const PICK = "xsplit.pick";
 const WIN = "xsplit.window";
+const SIZE = "xsplit.size";
+
+function clamp(n, lo, hi) {
+  return Math.max(lo, Math.min(hi, n));
+}
 
 function machineOf(address) {
   const i = String(address).indexOf("/");
@@ -29,12 +34,60 @@ function tail(path) {
   return parts.length ? parts[parts.length - 1] : "";
 }
 
+// The window. Reopening with the same key replaces the open one where it is, which is
+// how the grip resizes it: a window has no resize handle of its own.
+function openWindow(terms, w, h) {
+  const id = openOverlay({
+    kind: "window",
+    key: "xsplit",
+    width: w,
+    height: h,
+    layout: {
+      type: "column",
+      children: [
+        { type: "block", size: { px: 32 }, content: { mod: "xsplit", props: { xsplitBar: { terms } } } },
+        {
+          type: "row",
+          // A layout divider is drawn but not draggable over terminal blocks, so the
+          // right edge carries its own 14 px handle: dragging it changes the height.
+          divider: { width: 1, color: "border" },
+          children: [
+            ...terms.map((t) => ({
+              type: "block",
+              content: { terminal: t.address },
+              size: { weight: 1 },
+              min: 80,
+            })),
+            {
+              type: "block",
+              size: { px: 14 },
+              content: { mod: "xsplit", props: { xsplitGrip: { axis: "h", terms } } },
+            },
+          ],
+        },
+        { type: "block", size: { px: 14 }, content: { mod: "xsplit", props: { xsplitGrip: { axis: "w", terms } } } },
+      ],
+    },
+  });
+  setShared(WIN, id);
+  setShared(SIZE, { w: Math.round(w), h: Math.round(h) });
+  return id;
+}
+
 export default class XSplit extends View {
   init(_props, cx) {
     // A strip in the layout (`props.launcher`): one click opens the picker, so the
     // mod doesn't have to be started from a shell.
     if (props()?.launcher) {
       this.mode = "launcher";
+      return;
+    }
+
+    // The 14 px strip along the bottom of the window: drag it to resize.
+    if (props()?.xsplitGrip) {
+      this.mode = "grip";
+      this.drag = null;
+      this.self = null;
       return;
     }
 
@@ -94,20 +147,7 @@ export default class XSplit extends View {
       .filter((t) => this.pick.has(t.address))
       .map((t) => ({ address: t.address, where: t.where || t.cwd || "" }));
     if (!terms.length) return;
-    const id = openOverlay({
-      kind: "window",
-      key: "xsplit",
-      width: Math.min(1560, 420 * terms.length + 24),
-      height: 520,
-      layout: {
-        type: "column",
-        children: [
-          { type: "block", size: { px: 32 }, content: { mod: "xsplit", props: { xsplitBar: { terms } } } },
-          { type: "row", children: terms.map((t) => ({ type: "block", content: { terminal: t.address } })) },
-        ],
-      },
-    });
-    setShared(WIN, id);
+    openWindow(terms, Math.min(1560, 420 * terms.length + 24), 520);
     this.hint = `opened ${terms.length} pane${terms.length > 1 ? "s" : ""}`;
     cx.notify();
   }
@@ -145,8 +185,57 @@ export default class XSplit extends View {
   render(cx) {
     const t = theme();
     if (this.mode === "launcher") return this.renderLauncher(t, cx);
+    if (this.mode === "grip") return this.renderGrip(t, cx);
     if (this.bar) return this.renderBar(t, cx);
     return this.renderPicker(t, cx);
+  }
+
+  // Resize handles: the bottom edge drags the width, the right edge the height. GPUI
+  // delivers moves only while the pointer is over the element, so each handle is a
+  // 14 px band and the delta is applied when the button comes up — the window is then
+  // reopened at the new size, in the same place (same key).
+  renderGrip(t, cx) {
+    const grip = props()?.xsplitGrip ?? {};
+    const vertical = grip.axis === "h";
+    const size = shared(SIZE) || { w: 0, h: 0 };
+    const live = this.drag ? (vertical ? `${this.drag.h} high` : `${this.drag.w} wide`) : "";
+    const el = vertical
+      ? v_flex().id("xsplit-grip-h").size_full().py(10).items_center().justify_center()
+      : h_flex().id("xsplit-grip-w").size_full().px(8).items_center().justify_end();
+    return el
+      .bg(t.chrome)
+      .when(vertical, (e) => e.border_l(1))
+      .when(!vertical, (e) => e.border_t(1))
+      .border_color(t.border)
+      .gap(6)
+      .text_size(10)
+      .text_color(t.dim)
+      .when(vertical, (e) => e.cursor_ns_resize())
+      .when(!vertical, (e) => e.cursor_ew_resize())
+      .when(Boolean(live), (e) => e.child(div().text_color(t.accent).child(live)))
+      .child(div().child(vertical ? "⋮" : "◢"))
+      .on_mouse_down("left", (e, cx) => {
+        cx.stop_propagation();
+        const w0 = Math.round(size.w);
+        const h0 = Math.round(size.h);
+        this.drag = { x: e.position.x, y: e.position.y, w0, h0, w: w0, h: h0 };
+        cx.notify();
+      })
+      .on_mouse_move((e, cx) => {
+        const d = this.drag;
+        if (!d) return;
+        if (vertical) d.h = clamp(Math.round(d.h0 + (e.position.y - d.y)), 220, 1400);
+        else d.w = clamp(Math.round(d.w0 + (e.position.x - d.x)), 420, 2400);
+        cx.notify();
+      })
+      .on_mouse_up("left", (e, cx) => {
+        const d = this.drag;
+        this.drag = null;
+        cx.notify();
+        if (!d) return;
+        cx.stop_propagation();
+        openWindow(grip.terms ?? [], d.w, d.h);
+      });
   }
 
   // One row: a button that opens the picker. It lives in a narrow sidebar, so it
