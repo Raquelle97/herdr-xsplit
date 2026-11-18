@@ -47,17 +47,15 @@ beneath, 11.5 px text:
 - right: `×`, 7 px × 2 px, radius 5, 13 px, `dim`, `hover` background and `foreground`
   text under the pointer
 
-**The edges.** Two 14 px bands inside the window, both `chrome` with 1 px `border` on
-the side that touches a terminal, 10 px `dim` text:
-
-- along the bottom, full width, `◢` at the right end, cursor `ew-resize`, dragging it
-  changes the width
-- down the right side of the terminal row, full height, `⋮` centred, cursor `ns-resize`,
-  dragging it changes the height
-
-While a drag is in progress each one shows the pending number in `accent` (`1024 wide`,
-`640 high`) instead of its glyph. The window's own frame has no resize handle, so these
-are the only way to size it.
+**The size strip.** 18 px along the bottom, full width, `chrome` with a 1 px `border`
+above, 9 px side padding, 10 px `dim` text, right-aligned, `pointer` cursor, `hover`
+background and `foreground` text under the pointer. It carries one word — `fill`, or
+`restore` once the window is filled. It is a button, not a band: an earlier build put
+two 14 px drag bands here (bottom for width, right for height, `◢` and `⋮` glyphs,
+`ew-resize`/`ns-resize` cursors, the pending number in `accent` while dragging). Both
+worked and both were miserable to hit: 14 px is a thin target on a mouse, the press
+had to land on the band or it dragged the whole window instead. One button that
+changes the window's size in one step replaced them.
 
 **The strip**, for a layout: full width of its block, 12 px side padding, 7 px gaps,
 `chrome` background, 1 px `border` line above, 11.5 px `muted` text, `hover`
@@ -89,14 +87,20 @@ and truncating, `›` in `dim` at the right edge.
 - **Closing.** `×` closes `props().overlay` (the overlay tells the mod its own id in the
   props of a window block) or else the remembered `xsplit.window`, then sets that shared
   key to `null`. The terminals are untouched.
-- **Resizing.** A window has no resize handle, and `openOverlay` is the only thing that
-  sets a size, so the two bands fake one: `on_mouse_down` records the pointer and the
-  size last opened (`shared("xsplit.size")`), `on_mouse_move` recomputes that one axis
-  (`420…2400` wide, `220…1400` high), and `on_mouse_up` calls `openOverlay` again with
-  the same `key` — the window comes back at the new size in the same place the person
-  dropped it. Nothing resizes while the button is down; the number in the band is the
-  preview. 32 px of bar and 14 px of bottom band are outside the body the height band
-  spans, hence the `+ 46` when the height band starts a drag.
+- **Sizing.** A window has no resize handle and `openOverlay` is the only thing that
+  sets a size, so the strip's click reopens it: `fill` passes `width: 0.985,
+  height: 0.97` — `width`/`height` accept "up to 1: a share of the window", which is the
+  only way to fill the app without knowing the screen — and `restore` passes the size
+  the panes were opened at (`xsplit.prev`, written by every px-sized open). Which way
+  the click goes is read from `xsplit.size` (`w <= 1` means filled), so the button's
+  label and the action can't disagree.
+- **The filled window has its own `key`.** Reopening the same `key` replaces the window
+  *in its place* — the old top-left stays — so a share-sized window under `xsplit`
+  grew off the right and bottom edges instead of centring. A different `key`
+  (`xsplit.full`) is placed centred on its first open, and the px copy keeps its own
+  remembered position. Both are closed before the other opens; `closeOverlay(id)` then
+  `openOverlay` in the same handler does work (same-key replacement was the case that
+  silently failed).
 - **The strip** runs `tab.new { mod: "xsplit" }` on click — the same thing
   `herdr-app do tab.new --mod xsplit` does.
 - **`props.open`** — a list of addresses — opens a window on the picker's first render
@@ -106,15 +110,15 @@ and truncating, `›` in `dim` at the right edge.
 
 ## Built from
 
-`mods/xsplit/` — `main.js` (one `View`, 444 lines), `mod.json` (`{ "place": "none" }`:
+`mods/xsplit/` — `main.js` (one `View`, ~465 lines), `mod.json` (`{ "place": "none" }`:
 it must not dock itself), and this repo's `keys.json`
 (`alt-x` → `{"command": "tab.new", "args": {"mod": "xsplit"}}`).
 
 - `herdr`: `terminals`, `panes`, `theme`, `openOverlay`, `closeOverlay`, `props`,
   `shared`, `setShared`, `hc`, `run`.
 - `gpui-kit`: `View`, `div`; `gpui-base`: `v_flex`, `h_flex`, `InputState`, `Input`.
-  The bands use `on_mouse_down`/`on_mouse_move`/`on_mouse_up` with `cursor_ew_resize` /
-  `cursor_ns_resize`, and `cx.stop_propagation()` so the press never starts a window drag.
+  The size strip uses `on_mouse_down` with `cx.stop_propagation()` (otherwise the window
+  takes the press as a drag handle) plus `on_mouse_up` for the click itself.
 - `hc send` is the only program run: `hc(["send", "--force", <address>, <text>])`.
 - No images, no SVGs, no `exec`, no file reads. Glyphs are text (`⇄`, `›`, `×`).
 - `preview.png` was taken from the app with `herdr-app shot` on a 4090 + a 2084 column,
@@ -133,13 +137,17 @@ it must not dock itself), and this repo's `keys.json`
 - **The overlay passes its own id in `props`**, and only to the window's blocks. Keep the
   `props().overlay ?? shared("xsplit.window")` fallback: after a window is closed from
   elsewhere the shared id goes stale, and a `Close window` button driven by it lies.
-- **`on_size_change` on the same element kills the drag.** With it attached the
-  `on_mouse_up` never arrived: the band showed its pending number for ever and the
-  window never moved. Measuring the window another way (or not at all, and keeping the
-  opened size in `shared`) is what makes the release land.
-- **A press a few pixels off the band drags the whole window** instead of resizing it —
-  the band is only 14 px and the rest of the window is a `window_drag` region. Aim at
-  the band, not at the window edge.
+- **`on_size_change` on the same element kills `on_mouse_up`.** With it attached the
+  release never arrived: a drag band showed its pending number for ever and the window
+  never moved. Keep the opened size in `shared` instead of measuring the window.
+- **Any press the mod doesn't stop drags the window.** The whole window outside the
+  mod's own handlers is a `window_drag` region, so a control needs
+  `on_mouse_down → cx.stop_propagation()`, and a quick double click on it maximizes the
+  app window if it doesn't.
+- **`setShared` inside `openWindow` is too late for that window's first frame.**
+  `openOverlay` builds the new blocks and renders them before the lines after it run, so
+  a block that reads `shared("xsplit.maxed")` in `render` painted `fill` on a filled
+  window and never corrected itself. The state now travels in the block's own `props`.
 - **The bar is a drag handle** — the block sits in a `window_drag` region, so a double
   click maximizes the whole app window. Automation that clicks the bar twice will
   maximize Herdr.
@@ -168,9 +176,9 @@ it must not dock itself), and this repo's `keys.json`
 4. Typing `echo hi` in the bar and pressing Enter prints `hi` in both columns and the
    bar reports `sent to 2 panes`.
 5. `×` closes the window and both shells are still running afterwards.
-6. Dragging the bottom band left makes the window narrower and dragging the right band
-   down makes it taller; both keep the window where it was, and a press 2 px inside the
-   edge instead moves the whole window.
+6. Clicking `fill` in the bottom strip makes the window cover the Herdr window (centred,
+   edges just inside it) and the button reads `restore`; clicking `restore` brings back
+   the size it was opened at, where it was.
 7. Reopening the picker shows the same two rows ticked.
 8. `herdr-app do tab.new --mod xsplit --props '{"open":["<a>","<b>"]}'` opens the window
    without showing the picker first.

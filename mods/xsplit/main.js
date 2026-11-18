@@ -19,9 +19,15 @@ import { terminals, panes, theme, openOverlay, closeOverlay, props, shared, setS
 const PICK = "xsplit.pick";
 const WIN = "xsplit.window";
 const SIZE = "xsplit.size";
+const PREV = "xsplit.prev";
+const TERMS = "xsplit.terms";
 
-function clamp(n, lo, hi) {
-  return Math.max(lo, Math.min(hi, n));
+// A window's width/height take px or "up to 1: a share of the window", so a share is
+// the only way to fill the app window without knowing the screen size.
+const FULL = { w: 0.985, h: 0.97 };
+
+function isShare(v) {
+  return typeof v === "number" && v > 0 && v <= 1;
 }
 
 function machineOf(address) {
@@ -35,11 +41,17 @@ function tail(path) {
 }
 
 // The window. Reopening with the same key replaces the open one where it is, which is
-// how the grip resizes it: a window has no resize handle of its own.
+// how the size button resizes it: a window has no resize handle of its own. The filled
+// copy uses a key of its own: a replaced window keeps its old top-left, so a share
+// size under the same key would grow off the edge instead of centring — a fresh key is
+// placed centred, and remembers where it was dropped from then on.
 function openWindow(terms, w, h) {
+  const full = isShare(w) && isShare(h);
+  const opened = shared(WIN);
+  if (opened) closeOverlay(opened);
   const id = openOverlay({
     kind: "window",
-    key: "xsplit",
+    key: full ? "xsplit.full" : "xsplit",
     width: w,
     height: h,
     layout: {
@@ -48,30 +60,39 @@ function openWindow(terms, w, h) {
         { type: "block", size: { px: 32 }, content: { mod: "xsplit", props: { xsplitBar: { terms } } } },
         {
           type: "row",
-          // A layout divider is drawn but not draggable over terminal blocks, so the
-          // right edge carries its own 14 px handle: dragging it changes the height.
+          // A layout divider is drawn but not draggable over terminal blocks; the strip
+          // below the panes is the size control instead.
           divider: { width: 1, color: "border" },
-          children: [
-            ...terms.map((t) => ({
-              type: "block",
-              content: { terminal: t.address },
-              size: { weight: 1 },
-              min: 80,
-            })),
-            {
-              type: "block",
-              size: { px: 14 },
-              content: { mod: "xsplit", props: { xsplitGrip: { axis: "h", terms } } },
-            },
-          ],
+          children: terms.map((t) => ({
+            type: "block",
+            content: { terminal: t.address },
+            size: { weight: 1 },
+            min: 80,
+          })),
         },
-        { type: "block", size: { px: 14 }, content: { mod: "xsplit", props: { xsplitGrip: { axis: "w", terms } } } },
+        { type: "block", size: { px: 18 }, content: { mod: "xsplit", props: { xsplitGrip: { terms, maxed: full } } } },
       ],
     },
   });
   setShared(WIN, id);
-  setShared(SIZE, { w: Math.round(w), h: Math.round(h) });
+  setShared(SIZE, { w, h });
+  setShared(TERMS, terms);
+  // Where "restore" goes back to: the last size the panes were opened at, not the
+  // size the filled copy happens to have.
+  if (!full) setShared(PREV, { w: Math.round(w), h: Math.round(h) });
   return id;
+}
+
+// Fill the app window, or go back to the size the panes were opened at. The current
+// size tells which way to go, so the two buttons and the CLI shortcut agree.
+function toggleFull(terms) {
+  const size = shared(SIZE);
+  if (size && isShare(size.w)) {
+    const p = shared(PREV) || { w: 900, h: 520 };
+    openWindow(terms, p.w, p.h);
+  } else {
+    openWindow(terms, FULL.w, FULL.h);
+  }
 }
 
 export default class XSplit extends View {
@@ -83,11 +104,10 @@ export default class XSplit extends View {
       return;
     }
 
-    // The 14 px strip along the bottom of the window: drag it to resize.
+    // The strip along the bottom of the window (and the narrow one on its right):
+    // one click fills the app window, another goes back.
     if (props()?.xsplitGrip) {
       this.mode = "grip";
-      this.drag = null;
-      this.self = null;
       return;
     }
 
@@ -105,6 +125,17 @@ export default class XSplit extends View {
     // The picker pane. `props.open` is a list of terminal addresses to open at once,
     // so a fixed set can be started from the command line:
     //   herdr-app do tab.new --mod xsplit --props '{"open":["4090/t1f","5090/t2"]}'
+    // CLI shortcut for the size button, so the switch can be exercised without a
+    // click: --props '{"toggle":true}'
+    if (props()?.toggle) {
+      let fired = false;
+      cx.timer.every(300, () => {
+        if (fired) return;
+        fired = true;
+        toggleFull(shared(TERMS) ?? []);
+      });
+    }
+
     const wanted = props()?.open;
     const known = new Set(this.shown().map((t) => t.address));
     const initial = Array.isArray(wanted) && wanted.length ? wanted : shared(PICK) || [];
@@ -147,7 +178,16 @@ export default class XSplit extends View {
       .filter((t) => this.pick.has(t.address))
       .map((t) => ({ address: t.address, where: t.where || t.cwd || "" }));
     if (!terms.length) return;
-    openWindow(terms, Math.min(1560, 420 * terms.length + 24), 520);
+    const w = Math.min(1560, 420 * terms.length + 24);
+    const h = 520;
+    // `props.full` opens filled instead, so a fixed set can start that way:
+    //   --props '{"open":["4090/t1f","5090/t2"],"full":true}'
+    if (props()?.full) {
+      setShared(PREV, { w, h });
+      openWindow(terms, FULL.w, FULL.h);
+    } else {
+      openWindow(terms, w, h);
+    }
     this.hint = `opened ${terms.length} pane${terms.length > 1 ? "s" : ""}`;
     cx.notify();
   }
@@ -190,52 +230,33 @@ export default class XSplit extends View {
     return this.renderPicker(t, cx);
   }
 
-  // Resize handles: the bottom edge drags the width, the right edge the height. GPUI
-  // delivers moves only while the pointer is over the element, so each handle is a
-  // 14 px band and the delta is applied when the button comes up — the window is then
-  // reopened at the new size, in the same place (same key).
+  // The size button. A window has no resize handle, its divider can't be dragged over
+  // terminal blocks, and a 14 px drag band is a poor target anyway — so the strip is a
+  // plain click: fill the app window, or go back to the size the panes opened at.
   renderGrip(t, cx) {
     const grip = props()?.xsplitGrip ?? {};
-    const vertical = grip.axis === "h";
-    const size = shared(SIZE) || { w: 0, h: 0 };
-    const live = this.drag ? (vertical ? `${this.drag.h} high` : `${this.drag.w} wide`) : "";
-    const el = vertical
-      ? v_flex().id("xsplit-grip-h").size_full().py(10).items_center().justify_center()
-      : h_flex().id("xsplit-grip-w").size_full().px(8).items_center().justify_end();
-    return el
+    const maxed = Boolean(grip.maxed);
+    return h_flex()
+      .id("xsplit-grip")
+      .size_full()
+      .px(9)
+      .items_center()
+      .justify_end()
       .bg(t.chrome)
-      .when(vertical, (e) => e.border_l(1))
-      .when(!vertical, (e) => e.border_t(1))
+      .border_t(1)
       .border_color(t.border)
-      .gap(6)
       .text_size(10)
       .text_color(t.dim)
-      .when(vertical, (e) => e.cursor_ns_resize())
-      .when(!vertical, (e) => e.cursor_ew_resize())
-      .when(Boolean(live), (e) => e.child(div().text_color(t.accent).child(live)))
-      .child(div().child(vertical ? "⋮" : "◢"))
-      .on_mouse_down("left", (e, cx) => {
+      .cursor_pointer()
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      // The press has to be stopped or the window takes it as a drag handle (and a
+      // quick double click resizes the whole app window instead).
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_mouse_up("left", (_e, cx) => {
         cx.stop_propagation();
-        const w0 = Math.round(size.w);
-        const h0 = Math.round(size.h);
-        this.drag = { x: e.position.x, y: e.position.y, w0, h0, w: w0, h: h0 };
-        cx.notify();
+        toggleFull(grip.terms ?? []);
       })
-      .on_mouse_move((e, cx) => {
-        const d = this.drag;
-        if (!d) return;
-        if (vertical) d.h = clamp(Math.round(d.h0 + (e.position.y - d.y)), 220, 1400);
-        else d.w = clamp(Math.round(d.w0 + (e.position.x - d.x)), 420, 2400);
-        cx.notify();
-      })
-      .on_mouse_up("left", (e, cx) => {
-        const d = this.drag;
-        this.drag = null;
-        cx.notify();
-        if (!d) return;
-        cx.stop_propagation();
-        openWindow(grip.terms ?? [], d.w, d.h);
-      });
+      .child(div().child(maxed ? "restore" : "fill"));
   }
 
   // One row: a button that opens the picker. It lives in a narrow sidebar, so it

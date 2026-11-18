@@ -75,7 +75,7 @@ remembered, so the next picker opens with the same ones ticked. The list re-read
 every 3 s and only redraws when the set of terminals actually changed.
 
 `Open` makes one window, `420 + 24` px wide per terminal (capped at 1 560), 520 px
-tall, one column per picked terminal.
+tall, one column per picked terminal. Add `"full":true` to open it filled instead.
 
 ## The bar
 
@@ -99,9 +99,10 @@ tall, one column per picked terminal.
   doesn't close it — but it can't be moved to another monitor like a real window.
 - Columns are equal. The line between them is drawn, but dragging it does nothing: a
   terminal block takes the press before the layout's resize boundary sees it.
-- Resize from the edges: the 14 px band along the bottom drags the width, the one along
-  the right edge the height. The size is applied on release, and the window reopens at
-  the new size in the same place.
+- One size button, in the 18 px strip along the bottom: `fill` covers the Herdr window
+  (centred, a hair short of its edges), `restore` goes back to the size the panes were
+  opened at. It is a click, not a drag: a 14 px band over a terminal was a poor target,
+  and the window has no resize handle of its own.
 - With a terminal inside the window focused, those pane commands fail by design: the
   composition belongs to the mod, so change the layout in `main.js` instead.
 - Only terminals attached to a pane can be shown. A bare `hc run --bg` terminal has no
@@ -109,8 +110,10 @@ tall, one column per picked terminal.
 - Clicking a terminal inside the window focuses it, which can move the main view to
   that terminal's space. Use the window to look side by side, and to broadcast.
 - The bar is a drag handle: double-clicking it maximizes the Herdr window.
-- Opening again replaces the window (its `key` is fixed at `xsplit`), so a second
-  opening doesn't stack.
+- Opening again replaces the window, so a second opening doesn't stack. The filled copy
+  has its own `key` (`xsplit.full`): a replaced window keeps its old top-left, so a
+  share-of-window size under the same key would grow off the edge instead of centring.
+  The cost is that the two remember where they were dropped separately.
 - Windows: an IME swallows `ctrl-shift-m` before the app sees it, which is why the
   shipped key is `alt-x`.
 
