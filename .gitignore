@@ -1,0 +1,9 @@
+# Herdr writes these into every mod folder when it loads it
+config.json
+mods/*/config.json
+mods/*/jsconfig.json
+mods/*/*.d.ts
+
+# OS junk
+.DS_Store
+Thumbs.db

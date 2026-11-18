@@ -1,0 +1,5 @@
+{
+  "global": {
+    "alt-x": { "command": "tab.new", "args": { "mod": "xsplit" } }
+  }
+}
