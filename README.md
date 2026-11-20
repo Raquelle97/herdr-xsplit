@@ -2,17 +2,13 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Terminals from several machines side by side in one floating window, with one line
-box that sends what you type to all of them at once.
+Opens a new shell on another machine in a floating window, without leaving the
+space you are in. Closing the window closes that shell.
 
-![xsplit](preview.png)
-
-Herdr keeps a tab inside one machine: every pane of a tab runs in that space's core,
-so `pane.split` can only split the machine you are already on. A mod can't change
-that. It *can* put terminals from any number of machines in one window, because a
-window's layout takes blocks whose content is a terminal address and those addresses
-are machine-qualified (`4090/t1f`, `5090/t2`). This mod is that window, the picker
-that opens it, and a strip you can park in your layout to launch it.
+Herdr keeps a space on one machine, so the shell has to be started on the other
+machine. The mod makes a space named `temp` there (`focus: false`, so the space
+you are looking at stays put) and draws its terminal in the window. A terminal
+with no pane cannot be drawn.
 
 ## Install
 
@@ -32,13 +28,13 @@ Copy-Item -Recurse -Force "$env:TEMP\xsplit\mods\xsplit" mods\xsplit
 herdr-app check mods\xsplit
 ```
 
-Nothing appears on its own: this is not a docked panel, so it needs one of the three
-entry points below.
+Nothing appears on its own: this is not a docked panel, so it needs one of the
+three entry points below.
 
 ## Open it
 
-**A strip in your layout.** Add this block to a column of `layouts/<name>.json` and
-switch the layout back on (`alt`+`l` picks a layout; saving the file reloads it):
+**A strip in your layout.** Add this block to a column of `layouts/<name>.json`
+and switch the layout back on (`alt`+`l` picks a layout; saving the file reloads it):
 
 ```json
 { "id": "xsplit-launch", "type": "block",
@@ -58,64 +54,50 @@ add the line to it rather than replacing it:
 herdr-app do tab.new --mod xsplit
 ```
 
-and a fixed set straight away, skipping the picker:
-
-```sh
-herdr-app do tab.new --mod xsplit --props '{"open":["4090/t1f","5090/t2"]}'
-```
-
 ## The picker
 
-A card with a `Cross-machine` header, the count of picked terminals, `Clear` once
-something is picked, and `Open N`. Under it the live terminals, grouped by machine —
-this computer first, then alphabetically by machine name — and inside a group by
-address. Each row: a checkbox, the address in muted type, the program's name, the tail
-of its folder, and the agent status when it has one. Click a row to pick it; picks are
-remembered, so the next picker opens with the same ones ticked. The list re-reads
-every 3 s and only redraws when the set of terminals actually changed.
+A card titled `Other machine`. Under it, the machines that are connected and are
+not the machine of the space you are in. This computer is listed first, then the
+others by name. Machines that are still loading or offline are left out. Click a
+row and a shell starts there. The list re-reads every 3 s.
 
-`Open` makes one window, `420 + 24` px wide per terminal (capped at 1 560), 520 px
-tall, one column per picked terminal. Add `"full":true` to open it filled instead.
+While it is connecting, the header says `opening …`. If no pane shows up within
+about 5 s, the header says `couldn't open …` and any space that did appear is
+closed. A second click waits until that attempt finishes.
 
-## The bar
+## The window
 
-32 px across the top of the window:
+One shell, about 760×480 the first time (the next one reuses the last size):
 
-- left: the machines in the window, in column order
-- middle: a line box. Enter sends that line to **every** terminal in the window
-  (`hc send --force <address> <text>`, one call per address) and reports
-  `sent to N panes`, or `failed: 4090` for the ones that refused. It is a command
-  broadcast, not a keystroke mirror: tmux's `synchronize-panes` behaviour — every key
-  appearing in every pane as you type — has no API here.
-- right: `×` closes the window. The terminals keep running; they are ordinary
-  terminals of their machines.
+- top, 32 px: the machine's name. `×` closes the window and the `temp` space.
+  The rest of the bar drags the window.
+- middle: the shell.
+- right edge: drag left or right to change the width.
+- bottom edge: drag up or down to change the height.
+- bottom-right corner: drag to change both. A dim layer follows the pointer and
+  shows the size; releasing applies it. The window stays where you put it.
+
+The window is replaced, not stacked, when you open another machine. It is not
+kept across a restart.
 
 ## Limits
 
-- It is a window, not a tab. No divider drag, no `pane.split`/`pane.close`/`pane.zoom`,
-  and it is not saved with the tab.
-- It is not an OS window either: Herdr has one window and this floats inside it. It
-  keeps where you dropped it (`key`), it stays above the panes, and a click beside it
-  doesn't close it — but it can't be moved to another monitor like a real window.
-- Columns are equal. The line between them is drawn, but dragging it does nothing: a
-  terminal block takes the press before the layout's resize boundary sees it.
-- One size button, in the 18 px strip along the bottom: `fill` covers the Herdr window
-  (centred, a hair short of its edges), `restore` goes back to the size the panes were
-  opened at. It is a click, not a drag: a 14 px band over a terminal was a poor target,
-  and the window has no resize handle of its own.
-- With a terminal inside the window focused, those pane commands fail by design: the
-  composition belongs to the mod, so change the layout in `main.js` instead.
-- Only terminals attached to a pane can be shown. A bare `hc run --bg` terminal has no
-  pane and renders as an empty strip — the whole window collapses to its bar.
-- Clicking a terminal inside the window focuses it, which can move the main view to
-  that terminal's space. Use the window to look side by side, and to broadcast.
+- It is a window inside Herdr, not an operating-system window and not a tab.
+  No `pane.split` / `pane.close` / `pane.zoom`, and it is not saved with the tab.
+- Herdr's window has no resize handle. Releasing a resize drag reopens this
+  window at the new size, so the top-left corner stays where you dropped it.
+  Smallest size is 360×240.
+- The `temp` space shows in the Spaces list while the window is open, because
+  that is the pane the window draws. Closing the window, or exiting the shell,
+  closes the space.
+- Switching layout closes the window. The `temp` space can still be there
+  afterwards; open the picker and start another shell, which closes the previous
+  one first, or close `temp` yourself.
+- Clicking the shell can focus it and show the `temp` space in the main view.
+  Opening it does not: `focus: false` keeps the space you were in.
 - The bar is a drag handle: double-clicking it maximizes the Herdr window.
-- Opening again replaces the window, so a second opening doesn't stack. The filled copy
-  has its own `key` (`xsplit.full`): a replaced window keeps its old top-left, so a
-  share-of-window size under the same key would grow off the edge instead of centring.
-  The cost is that the two remember where they were dropped separately.
-- Windows: an IME swallows `ctrl-shift-m` before the app sees it, which is why the
-  shipped key is `alt-x`.
+- Windows: an IME swallows `ctrl-shift-m` before the app sees it, which is why
+  the shipped key is `alt-x`.
 
 ## License
 

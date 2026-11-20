@@ -1,267 +1,301 @@
-// Cross-machine split view.
+// A temporary shell on another machine.
 //
-// Herdr keeps one tab inside one machine, so panes from two machines can't share
-// a tab. A mod *can* put terminals from any number of machines in one window:
-// a window's layout takes blocks whose content is a terminal address, and those
-// addresses are machine-qualified (`4090/t1f`). This mod is the picker that opens
-// such a window, plus the bar inside it (labels, one line sent to every pane, close).
-//
-//   herdr-app do tab.new --mod xsplit        # a tab whose only pane is the picker
-//
-// The window is not a tab: it has no divider drag, no pane.split, and it isn't
-// saved with the tab. Its terminals are ordinary terminals of their machines and
-// keep running after the window closes.
+// The space you are in belongs to one machine. This mod lists the others and
+// opens a new shell there in a floating window. The shell lives in its own
+// space so the window has a real pane to draw; closing the window closes that
+// space. The window has no resize handle. Drag the right edge for width, the
+// bottom edge for height, or the corner for both. The pointer is then tracked
+// across the whole Herdr window, and the shell is resized once, on release.
 
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { terminals, panes, theme, openOverlay, closeOverlay, props, shared, setShared, hc, run } from "herdr";
+import { v_flex, h_flex } from "gpui-base";
+import { spaces, panes, machines, focused, theme, openOverlay, closeOverlay, props, shared, setShared, run } from "herdr";
 
-const PICK = "xsplit.pick";
 const WIN = "xsplit.window";
 const SIZE = "xsplit.size";
-const PREV = "xsplit.prev";
-const TERMS = "xsplit.terms";
+const SPACE = "xsplit.space";
+const DRAG = "xsplit.drag";
+const VEIL = "xsplit.veil";
 
-// A window's width/height take px or "up to 1: a share of the window", so a share is
-// the only way to fill the app window without knowing the screen size.
-const FULL = { w: 0.985, h: 0.97 };
+const DEFAULT_W = 760;
+const DEFAULT_H = 480;
+const MIN_W = 360;
+const MIN_H = 240;
+const GRIP = 28;
+const WAIT_MS = 200;
+const WAIT_TICKS = 25;
 
-function isShare(v) {
-  return typeof v === "number" && v > 0 && v <= 1;
+function labelOf(name) {
+  return name == null || name === "" ? "this computer" : String(name);
 }
 
-function machineOf(address) {
-  const i = String(address).indexOf("/");
-  return i < 0 ? "this computer" : address.slice(0, i);
+function currentMachine() {
+  const id = focused()?.space;
+  if (!id) return undefined;
+  const space = spaces().find((s) => s.id === id);
+  if (!space) return undefined;
+  return space.machine ?? null;
 }
 
-function tail(path) {
-  const parts = String(path || "").split(/[\\/]/).filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : "";
+function otherMachines() {
+  const here = currentMachine();
+  return machines()
+    .filter((m) => m.layout === "ready" && (here === undefined || (m.name ?? null) !== here))
+    .sort((a, b) => {
+      const an = a.name ?? null;
+      const bn = b.name ?? null;
+      if (an == null && bn != null) return -1;
+      if (an != null && bn == null) return 1;
+      return labelOf(an).localeCompare(labelOf(bn));
+    });
 }
 
-// The window. Reopening with the same key replaces the open one where it is, which is
-// how the size button resizes it: a window has no resize handle of its own. The filled
-// copy uses a key of its own: a replaced window keeps its old top-left, so a share
-// size under the same key would grow off the edge instead of centring — a fresh key is
-// placed centred, and remembers where it was dropped from then on.
-function openWindow(terms, w, h) {
-  const full = isShare(w) && isShare(h);
+function terminalIn(space) {
+  if (!space) return null;
+  const tabs = new Set((space.tabs ?? []).map((t) => t.id));
+  const pane = panes().find((p) => tabs.has(p.tab) && p.terminal);
+  return pane ? pane.terminal : null;
+}
+
+function rememberedSize() {
+  const size = shared(SIZE);
+  const w = Number(size?.w);
+  const h = Number(size?.h);
+  if (w >= MIN_W && h >= MIN_H) return { w: Math.round(w), h: Math.round(h) };
+  return { w: DEFAULT_W, h: DEFAULT_H };
+}
+
+// Bottom changes height, right changes width, the corner changes both.
+// That is the direction a window edge moves, not the long axis of the strip.
+function dragSize(drag, x, y) {
+  let w = drag.w;
+  let h = drag.h;
+  if (drag.edge === "right" || drag.edge === "corner") {
+    w = Math.max(MIN_W, Math.round(drag.w + (x - drag.x)));
+  }
+  if (drag.edge === "bottom" || drag.edge === "corner") {
+    h = Math.max(MIN_H, Math.round(drag.h + (y - drag.y)));
+  }
+  return { w, h };
+}
+
+function openVeil() {
+  if (shared(VEIL)) return;
+  const drag = shared(DRAG);
+  // Mark the gesture before the overlay exists, so a mouse-up caused by opening
+  // it is not treated as the user letting go.
+  if (drag) setShared(DRAG, { ...drag, tracking: Date.now() });
+  const id = openOverlay({
+    mod: "xsplit",
+    kind: "window",
+    key: "xsplit.veil",
+    width: 1,
+    height: 1,
+    frame: "none",
+    props: { xsplitVeil: true },
+  });
+  setShared(VEIL, id);
+}
+
+function finishDrag(point) {
+  const drag = shared(DRAG);
+  if (!drag) return;
+  const size = point ? dragSize(drag, point.x, point.y) : { w: drag.w, h: drag.h };
+  const veil = shared(VEIL);
+  setShared(DRAG, null);
+  setShared(VEIL, null);
+  if (veil) closeOverlay(veil);
+  if (!drag.address) return;
+  if (size.w === drag.w && size.h === drag.h) return;
+  openWindow(drag.address, drag.machine, size.w, size.h);
+}
+
+function openWindow(address, machine, w, h) {
   const opened = shared(WIN);
   if (opened) closeOverlay(opened);
+  const name = machine ?? "";
   const id = openOverlay({
     kind: "window",
-    key: full ? "xsplit.full" : "xsplit",
+    key: "xsplit",
     width: w,
     height: h,
     layout: {
       type: "column",
       children: [
-        { type: "block", size: { px: 32 }, content: { mod: "xsplit", props: { xsplitBar: { terms } } } },
+        { type: "block", size: { px: 32 }, content: { mod: "xsplit", props: { xsplitBar: { machine: name } } } },
         {
           type: "row",
-          // A layout divider is drawn but not draggable over terminal blocks; the strip
-          // below the panes is the size control instead.
-          divider: { width: 1, color: "border" },
-          children: terms.map((t) => ({
-            type: "block",
-            content: { terminal: t.address },
-            size: { weight: 1 },
-            min: 80,
-          })),
+          children: [
+            { type: "block", content: { terminal: address }, size: { weight: 1 }, min: 80 },
+            {
+              type: "block",
+              size: { px: GRIP },
+              content: { mod: "xsplit", props: { xsplitGrip: { edge: "right", address, machine: name } } },
+            },
+          ],
         },
-        { type: "block", size: { px: 18 }, content: { mod: "xsplit", props: { xsplitGrip: { terms, maxed: full } } } },
+        {
+          type: "row",
+          size: { px: GRIP },
+          children: [
+            {
+              type: "block",
+              size: { weight: 1 },
+              content: { mod: "xsplit", props: { xsplitGrip: { edge: "bottom", address, machine: name } } },
+            },
+            {
+              type: "block",
+              size: { px: GRIP },
+              content: { mod: "xsplit", props: { xsplitGrip: { edge: "corner", address, machine: name } } },
+            },
+          ],
+        },
       ],
     },
   });
   setShared(WIN, id);
-  setShared(SIZE, { w, h });
-  setShared(TERMS, terms);
-  // Where "restore" goes back to: the last size the panes were opened at, not the
-  // size the filled copy happens to have.
-  if (!full) setShared(PREV, { w: Math.round(w), h: Math.round(h) });
+  setShared(SIZE, { w: Math.round(w), h: Math.round(h) });
   return id;
 }
 
-// Fill the app window, or go back to the size the panes were opened at. The current
-// size tells which way to go, so the two buttons and the CLI shortcut agree.
-function toggleFull(terms) {
-  const size = shared(SIZE);
-  if (size && isShare(size.w)) {
-    const p = shared(PREV) || { w: 900, h: 520 };
-    openWindow(terms, p.w, p.h);
-  } else {
-    openWindow(terms, FULL.w, FULL.h);
-  }
+function closeTempSpace() {
+  const id = shared(SPACE);
+  if (!id) return;
+  setShared(SPACE, null);
+  if (spaces().some((s) => s.id === id)) run("space.close", { id, confirmed: true });
+}
+
+function dismissWindow() {
+  const veil = shared(VEIL);
+  if (veil) closeOverlay(veil);
+  setShared(VEIL, null);
+  setShared(DRAG, null);
+  const id = shared(WIN);
+  if (id) closeOverlay(id);
+  setShared(WIN, null);
+  closeTempSpace();
 }
 
 export default class XSplit extends View {
   init(_props, cx) {
-    // A strip in the layout (`props.launcher`): one click opens the picker, so the
-    // mod doesn't have to be started from a shell.
     if (props()?.launcher) {
       this.mode = "launcher";
       return;
     }
-
-    // The strip along the bottom of the window (and the narrow one on its right):
-    // one click fills the app window, another goes back.
+    if (props()?.xsplitVeil) {
+      this.mode = "veil";
+      this.preview = null;
+      this.point = null;
+      this.born = Date.now();
+      return;
+    }
     if (props()?.xsplitGrip) {
       this.mode = "grip";
+      this.preview = null;
+      return;
+    }
+    if (props()?.xsplitBar) {
+      this.mode = "bar";
+      cx.timer.every(500, () => this.reap());
       return;
     }
 
-    const bar = props()?.xsplitBar;
-    if (bar) {
-      // Inside the window: a title bar with a broadcast box.
-      this.bar = bar;
-      this.hint = null;
-      this.busy = false;
-      this.input = InputState.new({ placeholder: "send a line to every pane…" });
-      this.input.on("submit", (_e, cx) => this.broadcast(cx));
-      return;
-    }
-
-    // The picker pane. `props.open` is a list of terminal addresses to open at once,
-    // so a fixed set can be started from the command line:
-    //   herdr-app do tab.new --mod xsplit --props '{"open":["4090/t1f","5090/t2"]}'
-    // CLI shortcut for the size button, so the switch can be exercised without a
-    // click: --props '{"toggle":true}'
-    if (props()?.toggle) {
-      let fired = false;
-      cx.timer.every(300, () => {
-        if (fired) return;
-        fired = true;
-        toggleFull(shared(TERMS) ?? []);
-      });
-    }
-
-    const wanted = props()?.open;
-    const known = new Set(this.shown().map((t) => t.address));
-    const initial = Array.isArray(wanted) && wanted.length ? wanted : shared(PICK) || [];
-    this.pick = new Set(initial.filter((a) => known.has(a)));
-    this.pendingOpen = Array.isArray(wanted) && this.pick.size > 0;
+    this.mode = "picker";
     this.hint = null;
-    this.seen = "";
+    this.pending = null;
+    this.wait = null;
+    this.seen = this.machineSig();
     cx.timer.every(3000, (acx) => {
-      if (this.sig() === this.seen) return;
+      const sig = this.machineSig();
+      if (sig === this.seen) return;
+      this.seen = sig;
       acx.notify();
     });
   }
 
-  // Terminals a window block can actually show: live, and attached to a pane.
-  // A bare `hc run --bg` terminal has no pane, and a block for it renders as an
-  // empty strip (the window collapses to its bar).
-  shown() {
-    const attached = new Set(panes().map((p) => p.terminal).filter(Boolean));
-    return terminals().filter((t) => t.state === "live" && attached.has(t.address));
+  machineSig() {
+    return otherMachines().map((m) => `${m.name ?? ""}:${m.layout}`).join("|");
   }
 
-  // Cheap fingerprint of the live terminal list, so the timer only redraws on change.
-  sig() {
-    return this.shown()
-      .map((t) => `${t.address}:${t.where || ""}`)
-      .sort()
-      .join("|");
-  }
-
-  toggle(address, cx) {
-    if (this.pick.has(address)) this.pick.delete(address);
-    else this.pick.add(address);
-    setShared(PICK, [...this.pick]);
-    cx.notify();
-  }
-
-  open(cx) {
-    const live = this.shown();
-    const terms = live
-      .filter((t) => this.pick.has(t.address))
-      .map((t) => ({ address: t.address, where: t.where || t.cwd || "" }));
-    if (!terms.length) return;
-    const w = Math.min(1560, 420 * terms.length + 24);
-    const h = 520;
-    // `props.full` opens filled instead, so a fixed set can start that way:
-    //   --props '{"open":["4090/t1f","5090/t2"],"full":true}'
-    if (props()?.full) {
-      setShared(PREV, { w, h });
-      openWindow(terms, FULL.w, FULL.h);
-    } else {
-      openWindow(terms, w, h);
+  // The shell exited: the space still has tabs, but none of them has a terminal.
+  // An empty tab list is left alone — it can be a remote space that has not
+  // reported its pane yet, and closing it would kill a shell that is still starting.
+  reap() {
+    const id = shared(SPACE);
+    if (!id) return;
+    const space = spaces().find((s) => s.id === id);
+    if (!space) {
+      setShared(SPACE, null);
+      return;
     }
-    this.hint = `opened ${terms.length} pane${terms.length > 1 ? "s" : ""}`;
-    cx.notify();
+    if (!space.tabs?.length || terminalIn(space)) return;
+    setShared(SPACE, null);
+    run("space.close", { id, confirmed: true });
+    const win = shared(WIN);
+    if (win) {
+      closeOverlay(win);
+      setShared(WIN, null);
+    }
   }
 
-  // One line, typed once, submitted in every terminal of the window.
-  // `hc send` pastes the text and presses Enter; --force goes ahead even when a
-  // program is mid-draft, which is the point of a broadcast.
-  broadcast(cx) {
-    if (!this.input || this.busy) return;
-    const text = this.input.value().trim();
-    if (!text) return;
-    const list = this.bar.terms.map((t) => t.address);
-    this.busy = true;
-    this.hint = "sending…";
-    this.input.set_value("");
+  openMachine(machine, cx) {
+    if (this.pending) return;
+    dismissWindow();
+    const before = new Set(spaces().map((s) => s.id));
+    this.pending = { before, ticks: 0, machine };
+    this.hint = `opening ${labelOf(machine)}…`;
     cx.notify();
-    cx.spawn(async (acx) => {
-      let ok = 0;
-      const bad = [];
-      for (const address of list) {
-        try {
-          const r = await hc(["send", "--force", address, text]);
-          if (r && r.code === 0) ok += 1;
-          else bad.push(machineOf(address));
-        } catch (e) {
-          bad.push(machineOf(address));
-        }
+    run("space.new", { machine: machine ?? "", name: "temp", focus: false });
+    if (this.adopt(cx)) return;
+    this.wait = cx.timer.every(WAIT_MS, (acx) => {
+      if (!this.pending) {
+        this.wait?.cancel();
+        this.wait = null;
+        return;
       }
-      this.busy = false;
-      this.hint = bad.length ? `failed: ${bad.join(", ")}` : `sent to ${ok} pane${ok > 1 ? "s" : ""}`;
+      this.pending.ticks += 1;
+      if (this.adopt(acx)) return;
+      if (this.pending.ticks < WAIT_TICKS) return;
+      this.wait?.cancel();
+      this.wait = null;
+      const leftover = spaces().find((s) => !before.has(s.id));
+      if (leftover) {
+        setShared(SPACE, leftover.id);
+        closeTempSpace();
+      }
+      this.pending = null;
+      this.hint = `couldn't open ${labelOf(machine)}`;
       acx.notify();
     });
+  }
+
+  adopt(cx) {
+    const pending = this.pending;
+    if (!pending) return false;
+    const created = spaces().find((s) => !pending.before.has(s.id));
+    const address = terminalIn(created);
+    if (!address) return false;
+    this.wait?.cancel();
+    this.wait = null;
+    this.pending = null;
+    setShared(SPACE, created.id);
+    const size = rememberedSize();
+    openWindow(address, created.machine ?? null, size.w, size.h);
+    this.hint = `opened ${labelOf(created.machine)}`;
+    cx.notify();
+    return true;
   }
 
   render(cx) {
     const t = theme();
     if (this.mode === "launcher") return this.renderLauncher(t, cx);
+    if (this.mode === "veil") return this.renderVeil(t, cx);
     if (this.mode === "grip") return this.renderGrip(t, cx);
-    if (this.bar) return this.renderBar(t, cx);
+    if (this.mode === "bar") return this.renderBar(t, cx);
     return this.renderPicker(t, cx);
   }
 
-  // The size button. A window has no resize handle, its divider can't be dragged over
-  // terminal blocks, and a 14 px drag band is a poor target anyway — so the strip is a
-  // plain click: fill the app window, or go back to the size the panes opened at.
-  renderGrip(t, cx) {
-    const grip = props()?.xsplitGrip ?? {};
-    const maxed = Boolean(grip.maxed);
-    return h_flex()
-      .id("xsplit-grip")
-      .size_full()
-      .px(9)
-      .items_center()
-      .justify_end()
-      .bg(t.chrome)
-      .border_t(1)
-      .border_color(t.border)
-      .text_size(10)
-      .text_color(t.dim)
-      .cursor_pointer()
-      .hover((s) => s.bg(t.hover).text_color(t.foreground))
-      // The press has to be stopped or the window takes it as a drag handle (and a
-      // quick double click resizes the whole app window instead).
-      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .on_mouse_up("left", (_e, cx) => {
-        cx.stop_propagation();
-        toggleFull(grip.terms ?? []);
-      })
-      .child(div().child(maxed ? "restore" : "fill"));
-  }
-
-  // One row: a button that opens the picker. It lives in a narrow sidebar, so it
-  // carries no count — a long label here gets clipped by the sidebar edge.
-  renderLauncher(t, cx) {
+  renderLauncher(t, _cx) {
     return h_flex()
       .id("xsplit-launch")
       .size_full()
@@ -277,12 +311,12 @@ export default class XSplit extends View {
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
       .on_click(() => run("tab.new", { mod: "xsplit" }))
       .child(div().flex_none().text_size(13).text_color(t.accent).child("⇄"))
-      .child(div().flex_1().truncate().child("Cross-machine"))
+      .child(div().flex_1().truncate().child("Other machine"))
       .child(div().flex_none().text_color(t.dim).child("›"));
   }
 
-  renderBar(t, cx) {
-    const names = this.bar.terms.map((x) => machineOf(x.address)).join("   ·   ");
+  renderBar(t, _cx) {
+    const bar = props()?.xsplitBar ?? {};
     return h_flex()
       .id("xsplit-bar")
       .w_full()
@@ -294,20 +328,8 @@ export default class XSplit extends View {
       .border_b(1)
       .border_color(t.border)
       .text_size(11.5)
-      .child(div().flex_none().text_color(t.muted).child(names))
-      .child(
-        Input.new(this.input)
-          .flex_1()
-          .h(24)
-          .px(6)
-          .rounded(6)
-          .border_1()
-          .border_color(t.border)
-          .bg(t.background)
-          .text_size(11.5)
-          .text_color(t.foreground),
-      )
-      .when(this.hint, (el) => el.child(div().flex_none().text_color(this.busy ? t.dim : t.accent).child(this.hint)))
+      .child(div().flex_none().text_color(t.muted).child(labelOf(bar.machine)))
+      .child(div().flex_1())
       .child(
         div()
           .id("xsplit-close")
@@ -319,37 +341,110 @@ export default class XSplit extends View {
           .text_color(t.dim)
           .cursor_pointer()
           .hover((s) => s.bg(t.hover).text_color(t.foreground))
-          .on_click(() => {
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_mouse_up("left", (_e, cx) => {
+            cx.stop_propagation();
             const id = props()?.overlay ?? shared(WIN);
             if (id) closeOverlay(id);
             setShared(WIN, null);
+            const veil = shared(VEIL);
+            if (veil) closeOverlay(veil);
+            setShared(VEIL, null);
+            setShared(DRAG, null);
+            closeTempSpace();
           })
           .child("×"),
       );
   }
 
-  renderPicker(t, cx) {
-    if (this.pendingOpen) {
-      this.pendingOpen = false;
-      this.open(cx);
-    }
-    const live = this.shown();
-    this.seen = this.sig();
-    const groups = [];
-    for (const x of live) {
-      const m = machineOf(x.address);
-      let g = groups.find((y) => y.m === m);
-      if (!g) {
-        g = { m, rows: [] };
-        groups.push(g);
-      }
-      g.rows.push(x);
-    }
-    const rank = (m) => (m === "this computer" ? 0 : 1);
-    groups.sort((a, b) => rank(a.m) - rank(b.m) || a.m.localeCompare(b.m));
-    for (const g of groups) g.rows.sort((a, b) => String(a.address).localeCompare(String(b.address)));
+  renderVeil(t, _cx) {
+    const drag = shared(DRAG);
+    const edge = drag?.edge ?? "corner";
+    const shown = this.preview || (drag ? { w: drag.w, h: drag.h } : { w: 0, h: 0 });
+    return v_flex()
+      .id("xsplit-veil")
+      .size_full()
+      .items_center()
+      .justify_center()
+      .gap(4)
+      .bg("#00000033")
+      .when(edge === "right", (el) => el.cursor_ew_resize())
+      .when(edge === "bottom", (el) => el.cursor_ns_resize())
+      .when(edge === "corner", (el) => el.cursor_nwse_resize())
+      .on_mouse_down("left", (e, cx) => {
+        cx.stop_propagation();
+        if (Date.now() - this.born < 150) return;
+        finishDrag(this.point || e.position);
+      })
+      .on_mouse_move((e, cx) => {
+        const current = shared(DRAG);
+        if (!current) return;
+        this.point = e.position;
+        this.preview = dragSize(current, e.position.x, e.position.y);
+        cx.notify();
+      })
+      .on_mouse_up("left", (e, cx) => {
+        cx.stop_propagation();
+        if (Date.now() - this.born < 150) return;
+        finishDrag(e.position);
+      })
+      .child(div().text_size(18).font_semibold().text_color(t.foreground).child(`${shown.w} × ${shown.h}`))
+      .child(div().text_size(11).text_color(t.dim).child("release to resize"));
+  }
 
-    const n = this.pick.size;
+  renderGrip(t, _cx) {
+    const grip = props()?.xsplitGrip ?? {};
+    const edge = grip.edge === "right" || grip.edge === "corner" ? grip.edge : "bottom";
+    const mark = edge === "right" ? "↔" : edge === "bottom" ? "↕" : "◢";
+    return h_flex()
+      .id(`xsplit-grip-${edge}`)
+      .size_full()
+      .items_center()
+      .justify_center()
+      .border_color(t.border)
+      .bg(t.chrome)
+      .text_size(11)
+      .text_color(t.dim)
+      .when(edge !== "right", (el) => el.border_t(1))
+      .when(edge !== "bottom", (el) => el.border_l(1))
+      .when(edge === "right", (el) => el.cursor_ew_resize())
+      .when(edge === "bottom", (el) => el.cursor_ns_resize())
+      .when(edge === "corner", (el) => el.cursor_nwse_resize())
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .on_mouse_down("left", (e, cx) => {
+        cx.stop_propagation();
+        if (!grip.address) return;
+        const size = rememberedSize();
+        setShared(DRAG, {
+          x: e.position.x,
+          y: e.position.y,
+          w: size.w,
+          h: size.h,
+          edge,
+          address: grip.address,
+          machine: grip.machine ?? "",
+        });
+      })
+      .on_mouse_move((e, cx) => {
+        const drag = shared(DRAG);
+        if (!drag || drag.edge !== edge) return;
+        this.preview = dragSize(drag, e.position.x, e.position.y);
+        const dist = Math.abs(e.position.x - drag.x) + Math.abs(e.position.y - drag.y);
+        if (dist >= 4) openVeil();
+        cx.notify();
+      })
+      .on_mouse_up("left", (e, cx) => {
+        cx.stop_propagation();
+        const drag = shared(DRAG);
+        if (drag?.tracking && Date.now() - drag.tracking < 150) return;
+        finishDrag(e.position);
+      })
+      .child(mark);
+  }
+
+  renderPicker(t, _cx) {
+    const list = otherMachines();
+    this.seen = this.machineSig();
     return v_flex()
       .id("xsplit")
       .size_full()
@@ -370,45 +465,10 @@ export default class XSplit extends View {
           .items_center()
           .border_b(1)
           .border_color(t.border)
-          .child(div().font_semibold().child("Cross-machine"))
-          .child(div().text_size(11).text_color(t.dim).child(n ? `${n} picked` : "pick terminals, then open"))
-          .child(div().flex_1())
-          .when(n > 0, (el) =>
-            el.child(
-              div()
-                .id("xsplit-clear")
-                .px(8)
-                .py(3)
-                .rounded(6)
-                .text_size(11.5)
-                .text_color(t.dim)
-                .cursor_pointer()
-                .hover((s) => s.bg(t.hover).text_color(t.foreground))
-                .on_click((_e, cx) => {
-                  this.pick.clear();
-                  setShared(PICK, []);
-                  cx.notify();
-                })
-                .child("Clear"),
-          ),
-          )
-          .child(
-            div()
-              .id("xsplit-open")
-              .px(10)
-              .py(3)
-              .rounded(6)
-              .text_size(11.5)
-              .font_medium()
-              .when(n > 0, (el) =>
-                el.bg(t.accent).text_color(t.accent_foreground).cursor_pointer().hover((s) => s.opacity(0.88)),
-              )
-              .when(n === 0, (el) => el.bg(t.raised).text_color(t.dim))
-              .on_click((_e, cx) => this.open(cx))
-              .child(ifText(n > 0, `Open ${n}`, "Open")),
-          ),
+          .child(div().font_semibold().child("Other machine"))
+          .child(div().text_size(11).text_color(t.dim).child(this.pending ? this.hint : "open a shell")),
       )
-      .when(this.hint, (el) =>
+      .when(this.hint && !this.pending, (el) =>
         el.child(div().flex_none().px(10).py(4).text_size(11).text_color(t.accent).child(this.hint)),
       )
       .child(
@@ -417,49 +477,26 @@ export default class XSplit extends View {
           .min_h(0)
           .overflow_y_scrollbar()
           .py(4)
-          .gap(6)
           .children(
-            groups.map((g) =>
-              v_flex()
-                .gap(1)
-                .child(div().px(10).py(3).text_size(11).font_medium().text_color(t.dim).child(g.m))
-                .children(
-                  g.rows.map((x) => {
-                    const on = this.pick.has(x.address);
-                    return h_flex()
-                      .id(`xsplit-${x.address}`)
-                      .h(26)
-                      .px(10)
-                      .gap(8)
-                      .items_center()
-                      .cursor_pointer()
-                      .when(on, (el) => el.bg(t.selected))
-                      .hover((s) => s.bg(t.hover))
-                      .on_click((_e, cx) => this.toggle(x.address, cx))
-                      .child(
-                        div()
-                          .flex_none()
-                          .size(11)
-                          .rounded(3)
-                          .border_1()
-                          .border_color(on ? t.accent : t.border)
-                          .when(on, (el) => el.bg(t.accent)),
-                      )
-                      .child(div().flex_none().text_size(11.5).text_color(t.muted).child(x.address))
-                      .child(div().flex_none().text_color(t.foreground).child(String(x.program?.name || x.agent || "shell")))
-                      .child(div().flex_1().truncate().text_color(t.dim).child(tail(x.where || x.cwd)))
-                      .when(Boolean(x.status), (el) => el.child(div().flex_none().text_size(11).text_color(t.accent).child(String(x.status))));
-                  }),
-                ),
-            ),
+            list.map((m, i) => {
+              const name = m.name ?? null;
+              const opening = Boolean(this.pending) && (this.pending.machine ?? null) === name;
+              return h_flex()
+                .id(`xsplit-m-${i}`)
+                .h(32)
+                .px(10)
+                .gap(8)
+                .items_center()
+                .cursor_pointer()
+                .hover((s) => s.bg(t.hover))
+                .on_click((_e, acx) => this.openMachine(name, acx))
+                .child(div().flex_1().truncate().child(labelOf(name)))
+                .when(opening, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("opening…")));
+            }),
           ),
       )
-      .when(groups.length === 0, (el) =>
-        el.child(div().p(14).text_color(t.dim).child("No live terminals. Open a space on a machine first.")),
+      .when(list.length === 0, (el) =>
+        el.child(div().p(14).text_color(t.dim).child("No other machine is connected.")),
       );
   }
-}
-
-function ifText(cond, a, b) {
-  return cond ? a : b;
 }
